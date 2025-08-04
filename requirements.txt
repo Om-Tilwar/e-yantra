@@ -1,7 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.2.0+cpu # Replace with your required version
 sentence-transformers
-pinecone-client
+pinecone
 langchain-groq
 langchain
 PyMuPDF  
