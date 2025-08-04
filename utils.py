@@ -1,15 +1,13 @@
+# utils.py
+
 import requests
 import fitz  # PyMuPDF
 import uuid
 import logging
-import asyncio
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-
 from pinecone import Pinecone, ServerlessSpec
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_groq import ChatGroq
-from groq import InternalServerError # Import the specific error for retrying
 
 from config import (
     GROQ_API_KEY,
@@ -26,13 +24,13 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# --- All functions before QASystem class remain the same ---
 def download_and_extract_text(pdf_url: str, request_id: str) -> str:
-    # ... no changes here
+    """Downloads a PDF from a URL and extracts its text content."""
     try:
         logging.info(f"[Request ID: {request_id}] Downloading PDF from {pdf_url}")
         response = requests.get(pdf_url, timeout=30)
         response.raise_for_status()
+
         logging.info(f"[Request ID: {request_id}] Extracting text from PDF binary content.")
         with fitz.open(stream=response.content, filetype="pdf") as doc:
             return "\n".join(page.get_text() for page in doc)
@@ -44,55 +42,86 @@ def download_and_extract_text(pdf_url: str, request_id: str) -> str:
         raise
 
 class QASystem:
-    def _init_(self):
-        # ... no changes here
+    def __init__(self):
+        """Initializes all components of the Q&A system."""
         logging.info("--- Initializing QASystem ---")
+        
+        # 1. Initialize LLM
         self.llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name=GROQ_LLM_MODEL, temperature=0)
         logging.info("  ✅ Groq LLM initialized.")
+        
+        # 2. Initialize embedding model
         self.embedding_model = SentenceTransformer(EMBEDDING_MODEL)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
         logging.info(f"  ✅ Embedding model '{EMBEDDING_MODEL}' loaded (Dimension: {self.embedding_dim}).")
+        
+        # 3. Initialize Pinecone
         self.pc = Pinecone(api_key=PINECONE_API_KEY)
         self.index_name = PINECONE_INDEX_NAME
         logging.info("  ✅ Pinecone connection successful.")
+        
+        # 4. Verify or create Pinecone index
         if self.index_name not in self.pc.list_indexes().names():
             logging.warning(f"Index '{self.index_name}' not found. Creating new index...")
-            self.pc.create_index(name=self.index_name, dimension=self.embedding_dim, metric="cosine", spec=ServerlessSpec(cloud='aws', region=PINECONE_ENVIRONMENT))
+            self.pc.create_index(
+                name=self.index_name,
+                dimension=self.embedding_dim,
+                metric="cosine",
+                spec=ServerlessSpec(cloud='aws', region=PINECONE_ENVIRONMENT)
+            )
             logging.info(f"  ✅ Index '{self.index_name}' created.")
         else:
             logging.info(f"  ✅ Index '{self.index_name}' already exists.")
+            
         self.index = self.pc.Index(self.index_name)
         logging.info("--- ✅ QASystem initialization complete ---")
 
-    # The synchronous methods can remain if you need them
-    # ...
+    def _chunk_text(self, text: str, request_id: str):
+        """Splits a long text into smaller, manageable chunks."""
+        logging.info(f"[Request ID: {request_id}] Starting text chunking.")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150, length_function=len)
+        chunks = text_splitter.split_text(text)
+        logging.info(f"[Request ID: {request_id}] Text chunking complete. Created {len(chunks)} chunks.")
+        return chunks
 
-    # --- REVISED ASYNC METHOD ---
-    # The @retry decorator is REMOVED from here
-    async def get_answer_async(self, question: str, namespace: str, request_id: str) -> str:
-        """Asynchronously answers a question by retrieving context and querying the LLM."""
+    def setup_document_context(self, text: str, request_id: str) -> str:
+        """Processes a document's text: chunks, embeds, and upserts to Pinecone."""
+        namespace = str(uuid.uuid4())
+        logging.info(f"[Request ID: {request_id}] Setting up new document context in namespace: {namespace}")
         
-        logging.info(f"[Request ID: {request_id}] ASYNC: Starting task for question: '{question}'")
-        loop = asyncio.get_running_loop()
+        chunks = self._chunk_text(text, request_id)
+        
+        logging.info(f"[Request ID: {request_id}] Generating embeddings for {len(chunks)} chunks...")
+        embeddings = self.embedding_model.encode(chunks, show_progress_bar=False).tolist()
+        logging.info(f"[Request ID: {request_id}] Embedding generation complete.")
+        
+        vectors_to_upsert = [{'id': f'vec-{i}', 'values': emb, 'metadata': {'text': chunk}} for i, (chunk, emb) in enumerate(zip(chunks, embeddings))]
+        
+        logging.info(f"[Request ID: {request_id}] Upserting {len(vectors_to_upsert)} vectors to Pinecone...")
+        batch_size = 100
+        for i in range(0, len(vectors_to_upsert), batch_size):
+            batch = vectors_to_upsert[i:i + batch_size]
+            self.index.upsert(vectors=batch, namespace=namespace)
+        
+        logging.info(f"[Request ID: {request_id}] Successfully upserted all vectors to namespace {namespace}.")
+        return namespace
 
-        # 1. Embed the question in a separate thread (CPU-bound)
-        question_embedding = await loop.run_in_executor(
-            None, self.embedding_model.encode, question
+    def get_answer(self, question: str, namespace: str, request_id: str) -> str:
+        """Answers a question by retrieving context from Pinecone and querying the LLM."""
+        logging.info(f"[Request ID: {request_id}] Generating embedding for the question.")
+        question_embedding = self.embedding_model.encode(question).tolist()
+        
+        logging.info(f"[Request ID: {request_id}] Querying Pinecone for relevant context.")
+        query_result = self.index.query(
+            namespace=namespace,
+            vector=question_embedding,
+            top_k=5,
+            include_metadata=True
         )
-
-        # 2. Query Pinecone in a separate thread (sync I/O)
-        query_result = await loop.run_in_executor(
-            None,
-            lambda: self.index.query(
-                namespace=namespace,
-                vector=question_embedding.tolist(),
-                top_k=5,
-                include_metadata=True
-            )
-        )
+        
         context = "\n\n".join(match['metadata']['text'] for match in query_result['matches'])
-        logging.info(f"[Request ID: {request_id}] ASYNC: Retrieved {len(query_result['matches'])} context snippets for '{question}'.")
-
+        logging.info(f"[Request ID: {request_id}] Retrieved {len(query_result['matches'])} context snippets.")
+        
         prompt = (
             "You are a helpful assistant. Use the provided context to answer the question accurately. "
             "If the answer is not available in the context, state that clearly.\n\n"
@@ -101,23 +130,7 @@ class QASystem:
             "Answer:"
         )
         
-        # 3. Call the LLM using a helper function that has the retry logic
-        # This is the new, more robust pattern
-        @retry(
-            wait=wait_exponential(multiplier=1, min=2, max=10),
-            stop=stop_after_attempt(3),
-            retry=retry_if_exception_type(InternalServerError),
-            before_sleep=lambda retry_state: logging.warning(
-                f"[Request ID: {request_id}] Groq over capacity for question '{question}'. "
-                f"Retrying in {retry_state.next_action.sleep:.2f} seconds..."
-            )
-        )
-        async def invoke_llm_with_retry():
-            logging.info(f"[Request ID: {request_id}] ASYNC: Sending prompt to Groq LLM for '{question}'.")
-            return await self.llm.ainvoke(prompt)
-
-        # Execute the retry-enabled function
-        response = await invoke_llm_with_retry()
-        
-        logging.info(f"[Request ID: {request_id}] ASYNC: Received response from LLM for '{question}'.")
+        logging.info(f"[Request ID: {request_id}] Sending prompt to Groq LLM.")
+        response = self.llm.invoke(prompt)
+        logging.info(f"[Request ID: {request_id}] Received response from LLM.")
         return response.content.strip()
