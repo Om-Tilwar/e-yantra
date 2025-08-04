@@ -1,0 +1,12 @@
+# requirements.txt
+
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+PyMuPDF
+pinecone-client
+sentence-transformers
+langchain-google-genai
+langchain
+pydantic[email] # for HttpUrl validation
