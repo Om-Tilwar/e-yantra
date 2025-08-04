@@ -1,4 +1,3 @@
-#utils.py 
 import requests
 import fitz  # PyMuPDF
 import uuid
@@ -27,10 +26,9 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# download_and_extract_text and the QASystem _init_ remain the same...
-
+# --- All functions before QASystem class remain the same ---
 def download_and_extract_text(pdf_url: str, request_id: str) -> str:
-    # This function remains unchanged
+    # ... no changes here
     try:
         logging.info(f"[Request ID: {request_id}] Downloading PDF from {pdf_url}")
         response = requests.get(pdf_url, timeout=30)
@@ -47,7 +45,7 @@ def download_and_extract_text(pdf_url: str, request_id: str) -> str:
 
 class QASystem:
     def _init_(self):
-        # This function remains unchanged
+        # ... no changes here
         logging.info("--- Initializing QASystem ---")
         self.llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name=GROQ_LLM_MODEL, temperature=0)
         logging.info("  ✅ Groq LLM initialized.")
@@ -66,30 +64,23 @@ class QASystem:
         self.index = self.pc.Index(self.index_name)
         logging.info("--- ✅ QASystem initialization complete ---")
 
-    # The synchronous get_answer and other methods can remain for other uses if needed
+    # The synchronous methods can remain if you need them
     # ...
 
-    # --- NEW ASYNC and RESILIENT get_answer method ---
-    @retry(
-        wait=wait_exponential(multiplier=1, min=2, max=10), # Wait 2s, then 4s, up to 10s
-        stop=stop_after_attempt(3), # Retry a maximum of 3 times
-        retry=retry_if_exception_type(InternalServerError), # Only retry on Groq's 503 error
-        before_sleep=lambda retry_state: logging.warning(
-            f"Groq over capacity, retrying in {retry_state.next_action.sleep} seconds..."
-        )
-    )
+    # --- REVISED ASYNC METHOD ---
+    # The @retry decorator is REMOVED from here
     async def get_answer_async(self, question: str, namespace: str, request_id: str) -> str:
-        """Asynchronously answers a question with automatic retries on failure."""
+        """Asynchronously answers a question by retrieving context and querying the LLM."""
         
         logging.info(f"[Request ID: {request_id}] ASYNC: Starting task for question: '{question}'")
         loop = asyncio.get_running_loop()
 
-        # 1. Embed the question (CPU-bound task) in a separate thread
+        # 1. Embed the question in a separate thread (CPU-bound)
         question_embedding = await loop.run_in_executor(
             None, self.embedding_model.encode, question
         )
 
-        # 2. Query Pinecone (I/O-bound, but pinecone-client is sync, so run in thread)
+        # 2. Query Pinecone in a separate thread (sync I/O)
         query_result = await loop.run_in_executor(
             None,
             lambda: self.index.query(
@@ -99,13 +90,9 @@ class QASystem:
                 include_metadata=True
             )
         )
-        logging.info(f"[Request ID: {request_id}] ASYNC: Retrieved {len(query_result['matches'])} context snippets for '{question}'.")
-        
-        # NOTE: Your log showed "Retrieved 0 context snippets."
-        # This means your namespace lookup failed. Ensure the document was indexed
-        # using the exact PDF URL as the namespace. This is a separate issue to fix.
         context = "\n\n".join(match['metadata']['text'] for match in query_result['matches'])
-        
+        logging.info(f"[Request ID: {request_id}] ASYNC: Retrieved {len(query_result['matches'])} context snippets for '{question}'.")
+
         prompt = (
             "You are a helpful assistant. Use the provided context to answer the question accurately. "
             "If the answer is not available in the context, state that clearly.\n\n"
@@ -114,10 +101,23 @@ class QASystem:
             "Answer:"
         )
         
-        # 3. Call the LLM asynchronously (I/O-bound)
-        # The @retry decorator will automatically handle failures here.
-        logging.info(f"[Request ID: {request_id}] ASYNC: Sending prompt to Groq LLM for '{question}'.")
-        response = await self.llm.ainvoke(prompt)
+        # 3. Call the LLM using a helper function that has the retry logic
+        # This is the new, more robust pattern
+        @retry(
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            stop=stop_after_attempt(3),
+            retry=retry_if_exception_type(InternalServerError),
+            before_sleep=lambda retry_state: logging.warning(
+                f"[Request ID: {request_id}] Groq over capacity for question '{question}'. "
+                f"Retrying in {retry_state.next_action.sleep:.2f} seconds..."
+            )
+        )
+        async def invoke_llm_with_retry():
+            logging.info(f"[Request ID: {request_id}] ASYNC: Sending prompt to Groq LLM for '{question}'.")
+            return await self.llm.ainvoke(prompt)
+
+        # Execute the retry-enabled function
+        response = await invoke_llm_with_retry()
         
         logging.info(f"[Request ID: {request_id}] ASYNC: Received response from LLM for '{question}'.")
         return response.content.strip()
