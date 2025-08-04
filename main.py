@@ -97,7 +97,7 @@ async def run_hackrx(request_data: QARequest, _=Depends(verify_token)):
         for q in questions:
             answers.append(qa_system.get_answer(q, namespace))
             print(f"Answered question. Waiting for 5 seconds before the next one...")
-            time.sleep(5) # Add a 5-second delay
+            time.sleep(2) # Add a 5-second delay
 
         return QAResponse(answers=answers)
 
