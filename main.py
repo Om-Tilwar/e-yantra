@@ -1,10 +1,8 @@
-# main.py
-
 import logging
 from typing import List
 import time
 import requests
-from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi import FastAPI, Depends, HTTPException, status, Header, APIRouter # MODIFIED: Import APIRouter
 from pydantic import BaseModel, HttpUrl
 
 from utils import download_and_extract_text, QASystem
@@ -20,6 +18,10 @@ app = FastAPI(
     description="An API to answer questions from a PDF document using a RAG pipeline.",
     version="1.0.0"
 )
+
+# --- MODIFIED: Create an APIRouter with a prefix ---
+# All routes defined on this router will be prefixed with /v1/api
+router = APIRouter(prefix="/v1/api")
 
 
 # --- Initialize Q&A System on Startup ---
@@ -53,11 +55,12 @@ async def verify_token(authorization: str = Header(..., description="Bearer toke
         )
 
 
-# --- API Endpoint ---
-@app.post("/hackrx/run",
-          response_model=QAResponse,
-          summary="Process a PDF and answer questions",
-          tags=["Q&A System"])
+# --- MODIFIED: API Endpoint attached to the router ---
+# The path is now combined: router prefix + endpoint path -> /v1/api/hackrx/run
+@router.post("/hackrx/run",
+             response_model=QAResponse,
+             summary="Process a PDF and answer questions",
+             tags=["Q&A System"])
 async def run_hackrx(request_data: QARequest, _=Depends(verify_token)):
     """
     This endpoint performs the following steps:
@@ -96,8 +99,8 @@ async def run_hackrx(request_data: QARequest, _=Depends(verify_token)):
         answers = []
         for q in questions:
             answers.append(qa_system.get_answer(q, namespace))
-            print(f"Answered question. Waiting for 5 seconds before the next one...")
-            time.sleep(2) # Add a 5-second delay
+            print(f"Answered question. Waiting for 2 seconds before the next one...")
+            time.sleep(2) # Add a 2-second delay
 
         return QAResponse(answers=answers)
 
@@ -114,5 +117,8 @@ async def run_hackrx(request_data: QARequest, _=Depends(verify_token)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal server error occurred."
         )
+
+# --- MODIFIED: Include the router in the main FastAPI application ---
+app.include_router(router)
 
 # To run the app, use the command: uvicorn main:app --reload
