@@ -4,8 +4,7 @@ sentence-transformers
 pinecone-client
 langchain-groq
 langchain
-fitz
-PyMuPDF
+PyMuPDF  
 fastapi
 uvicorn[standard]
 pydantic
