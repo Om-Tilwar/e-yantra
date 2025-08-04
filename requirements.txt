@@ -1,25 +1,17 @@
-# Web server and API framework
-fastapi
-uvicorn[standard]
+-index-url https://download.pytorch.org/whl/cpu
 
-# Data validation
-pydantic
-
-# HTTP client to download files
-requests
-
-# PDF text extraction
+# Core ML/Infra
+torch
+sentence-transformers
+pinecone-client
+langchain-groq
+langchain
+fitz # PyMuPDF
 PyMuPDF
 
-# Vector database client
-pinecone-client
-
-# Text embedding model
-sentence-transformers
-
-# Core LangChain and Groq LLM integration
-langchain
-langchain-groq
-
-# Loading environment variables from .env files
+# Web Server
+fastapi
+uvicorn[standard]
+pydantic
 python-dotenv
+requests
