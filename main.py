@@ -213,7 +213,7 @@ async def run_hackrx(request_data: QARequest, _=Depends(verify_token)):
             answer = qa_system.get_answer(q, namespace, request_id)
             answers.append(answer)
             logging.info(f"[Request ID: {request_id}] Got answer for question {i+1}.")
-            time.sleep(1)
+            # time.sleep(1)
 
         logging.info(f"[Request ID: {request_id}] All questions answered. Sending response.")
         return QAResponse(answers=answers)
