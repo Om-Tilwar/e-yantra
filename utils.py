@@ -1,137 +1,119 @@
-# utils.py
-
-import requests
-import fitz  # PyMuPDF
-import uuid
 import logging
-from pinecone import Pinecone, ServerlessSpec
-from sentence_transformers import SentenceTransformer
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_groq import ChatGroq # MODIFIED: Import ChatGroq
+from typing import List
+import time
+import requests
+from fastapi import FastAPI, Depends, HTTPException, status, Header, APIRouter
+from pydantic import BaseModel, HttpUrl
+import uuid # Import uuid to generate a request ID
 
-from config import (
-    GROQ_API_KEY, # MODIFIED: Import Groq API key
-    PINECONE_API_KEY,
-    PINECONE_ENVIRONMENT,
-    PINECONE_INDEX_NAME,
-    EMBEDDING_MODEL,
-    GROQ_LLM_MODEL # MODIFIED: Import Groq model name
+from utils import download_and_extract_text, QASystem
+from config import AUTH_TOKEN
+
+# --- Setup basic logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+# --- FastAPI App Initialization ---
+app = FastAPI(
+    title="Document Q&A API",
+    description="An API to answer questions from a PDF document using a RAG pipeline.",
+    version="1.0.0"
 )
 
-# --- Configure logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# --- Create an APIRouter with a prefix ---
+router = APIRouter(prefix="/v1/api")
 
 
-def download_and_extract_text(pdf_url: str) -> str:
-    """Downloads a PDF from a URL and extracts its text content."""
+# --- Initialize Q&A System on Startup ---
+qa_system = None
+try:
+    qa_system = QASystem()
+    logging.info("QASystem initialized successfully on startup.")
+except Exception as e:
+    logging.critical(f"FATAL: Failed to initialize QASystem on startup. Error: {e}")
+
+
+# --- Pydantic Models for Request and Response ---
+class QARequest(BaseModel):
+    documents: HttpUrl
+    questions: List[str]
+
+
+class QAResponse(BaseModel):
+    answers: List[str]
+
+
+# --- Dependency for Authentication ---
+async def verify_token(authorization: str = Header(..., description="Bearer token for authorization.")):
+    if not authorization.startswith("Bearer ") or authorization.split(" ")[1] != AUTH_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing bearer token.",
+        )
+
+
+# --- API Endpoint attached to the router ---
+@router.post("/hackrx/run",
+             response_model=QAResponse,
+             summary="Process a PDF and answer questions",
+             tags=["Q&A System"])
+async def run_hackrx(request_data: QARequest, _=Depends(verify_token)):
+    request_id = str(uuid.uuid4()) # ## TRACER ## Generate a unique ID for this request
+    logging.info(f"[Request ID: {request_id}] Received new request.")
+
+    if not qa_system:
+        logging.error(f"[Request ID: {request_id}] Halting request because QASystem is not available.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Q&A system is not available. Please check server logs."
+        )
+
     try:
-        logging.info(f"Downloading PDF from {pdf_url}")
-        response = requests.get(pdf_url)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        
-        logging.info("Extracting text from PDF.")
-        with fitz.open(stream=response.content, filetype="pdf") as doc:
-            return "\n".join(page.get_text() for page in doc)
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error downloading PDF: {e}")
-        raise
-    except Exception as e:
-        logging.error(f"Error extracting text from PDF: {e}")
-        raise
+        pdf_url = str(request_data.documents)
+        questions = request_data.questions
+        logging.info(f"[Request ID: {request_id}] Processing PDF: {pdf_url} with {len(questions)} questions.")
 
-class QASystem:
-    def __init__(self):
-        """Initializes all components of the Q&A system."""
-        logging.info("--- Initializing QASystem ---")
-        
-        # 1. Initialize the Groq LLM (MODIFIED)
-        logging.info("Step 1: Initializing Groq LLM...")
-        self.llm = ChatGroq(
-            groq_api_key=GROQ_API_KEY,
-            model_name=GROQ_LLM_MODEL,
-            temperature=0,
-        )
-        logging.info("   ✅ Groq LLM initialized.")
-        
-        # 2. Initialize the sentence embedding model
-        logging.info("Step 2: Initializing SentenceTransformer embedding model...")
-        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-        self.embedding_dim = 384
-        logging.info(f"   ✅ Embedding model '{EMBEDDING_MODEL}' loaded.")
-
-        # 3. Initialize Pinecone connection
-        logging.info("Step 3: Initializing Pinecone connection...")
-        self.pc = Pinecone(api_key=PINECONE_API_KEY)
-        self.index_name = PINECONE_INDEX_NAME
-        logging.info("   ✅ Pinecone connection successful.")
-        
-        # 4. Check for and create Pinecone index if needed
-        logging.info(f"Step 4: Verifying Pinecone index '{self.index_name}'...")
-        if self.index_name not in self.pc.list_indexes().names():
-            logging.warning(f"   Index '{self.index_name}' not found. Creating new index...")
-            self.pc.create_index(
-                name=self.index_name,
-                dimension=self.embedding_dim,
-                metric="cosine",
-                spec=ServerlessSpec(cloud='aws', region=PINECONE_ENVIRONMENT)
+        # ## TRACER ## Step 1: Download and extract text
+        logging.info(f"[Request ID: {request_id}] STEP 1: Starting download and text extraction.")
+        document_text = download_and_extract_text(pdf_url, request_id)
+        if not document_text:
+            logging.error(f"[Request ID: {request_id}] Failed to extract any text from the document.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to extract text from the document."
             )
-            logging.info(f"   ✅ Index '{self.index_name}' created.")
-        else:
-            logging.info(f"   ✅ Index '{self.index_name}' already exists.")
-            
-        self.index = self.pc.Index(self.index_name)
-        logging.info("--- ✅ QASystem initialization complete ---")
+        logging.info(f"[Request ID: {request_id}] STEP 1: Completed. Extracted {len(document_text)} characters.")
 
-    def _chunk_text(self, text: str):
-        """Splits a long text into smaller, manageable chunks."""
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1200, chunk_overlap=150, length_function=len
-        )
-        return text_splitter.split_text(text)
+        # ## TRACER ## Step 2: Index the document content
+        logging.info(f"[Request ID: {request_id}] STEP 2: Starting document setup and indexing.")
+        namespace = qa_system.setup_document_context(document_text, request_id)
+        logging.info(f"[Request ID: {request_id}] STEP 2: Completed. Document indexed under namespace: {namespace}")
 
-    def setup_document_context(self, text: str) -> str:
-        """Processes a document's text: chunks, embeds, and upserts to Pinecone."""
-        namespace = str(uuid.uuid4())
-        logging.info(f"Setting up new document context in namespace: {namespace}")
-        chunks = self._chunk_text(text)
-        embeddings = self.embedding_model.encode(chunks).tolist()
-        
-        vectors_to_upsert = [
-            {'id': f'vec-{i}', 'values': emb, 'metadata': {'text': chunk}}
-            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
-        ]
-        
-        # Upsert in batches to avoid overwhelming the connection
-        for i in range(0, len(vectors_to_upsert), 100):
-            batch = vectors_to_upsert[i:i + 100]
-            self.index.upsert(vectors=batch, namespace=namespace)
-        
-        logging.info(f"Successfully upserted {len(vectors_to_upsert)} vectors to namespace {namespace}.")
-        return namespace
+        # ## TRACER ## Step 3: Answer questions
+        logging.info(f"[Request ID: {request_id}] STEP 3: Starting to answer questions.")
+        answers = []
+        for i, q in enumerate(questions):
+            logging.info(f"[Request ID: {request_id}] Answering question {i+1}/{len(questions)}: '{q}'")
+            answer = qa_system.get_answer(q, namespace, request_id)
+            answers.append(answer)
+            logging.info(f"[Request ID: {request_id}] Got answer for question {i+1}.")
+            # This sleep is dangerous for timeouts. Consider removing it.
+            time.sleep(2)
 
-    def get_answer(self, question: str, namespace: str) -> str:
-        """Answers a question by retrieving context from Pinecone and querying the LLM."""
-        question_embedding = self.embedding_model.encode(question).tolist()
-        
-        query_result = self.index.query(
-            namespace=namespace,
-            vector=question_embedding,
-            top_k=5,
-            include_metadata=True
+        logging.info(f"[Request ID: {request_id}] All questions answered. Sending response.")
+        return QAResponse(answers=answers)
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"[Request ID: {request_id}] Failed to download PDF from URL: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not download the document from the URL: {pdf_url}"
         )
-        
-        context = "\n\n".join(match['metadata']['text'] for match in query_result['matches'])
-        
-        prompt = (
-            "You are a helpful assistant. Use the provided context to answer the question accurately. "
-            "If the answer is not available in the context, state that clearly.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {question}\n\n"
-            "Answer:"
+    except Exception as e:
+        logging.error(f"[Request ID: {request_id}] An unexpected error occurred: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal server error occurred."
         )
-        
-        response = self.llm.invoke(prompt)
-        return response.content.strip()
+
+app.include_router(router)
