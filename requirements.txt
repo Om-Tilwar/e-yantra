@@ -1,12 +1,25 @@
-# requirements.txt
-
+# Web server and API framework
 fastapi
 uvicorn[standard]
-python-dotenv
+
+# Data validation
+pydantic
+
+# HTTP client to download files
 requests
+
+# PDF text extraction
 PyMuPDF
+
+# Vector database client
 pinecone-client
+
+# Text embedding model
 sentence-transformers
-langchain-google-genai
+
+# Core LangChain and Groq LLM integration
 langchain
-pydantic[email] # for HttpUrl validation
+langchain-groq
+
+# Loading environment variables from .env files
+python-dotenv
