@@ -16,6 +16,6 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY") # This is now used for the LLM
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
 PINECONE_INDEX_NAME = "hackrx-vector-db"
 
-# --- Model Settings ---
+# --- Model Settings ---    
 EMBEDDING_MODEL = 'all-MiniLM-L6-v2'
 GROQ_LLM_MODEL = "llama3-8b-8192" 
