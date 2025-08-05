@@ -4,6 +4,8 @@ import requests
 import fitz  # PyMuPDF
 import uuid
 import logging
+from typing import List  # <--- FIX: This line was missing
+
 from pinecone import Pinecone, ServerlessSpec
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
