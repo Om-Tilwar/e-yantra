@@ -41,40 +41,43 @@ def download_and_extract_text(pdf_url: str, request_id: str) -> str:
         logging.error(f"[Request ID: {request_id}] Error extracting text from PDF: {e}")
         raise
 
+# utils.py
+
 class QASystem:
-    def __init__(self):
-        """Initializes all components of the Q&A system."""
-        logging.info("--- Initializing QASystem ---")
+    # ... (__init__, _chunk_text, setup_document_context are the same) ...
+
+    def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generates embeddings for a list of texts in a single batch."""
+        logging.info(f"Generating embeddings for a batch of {len(texts)} texts...")
+        embeddings = self.embedding_model.encode(texts, show_progress_bar=False).tolist()
+        logging.info("Batch embedding generation complete.")
+        return embeddings
+
+    def get_answer_from_embedding(self, question: str, question_embedding: List[float], namespace: str, request_id: str) -> str:
+        """Finds an answer using a pre-computed question embedding."""
+        logging.info(f"[Request ID: {request_id}] Querying Pinecone for: '{question}'")
+        query_result = self.index.query(
+            namespace=namespace,
+            vector=question_embedding,
+            top_k=5,
+            include_metadata=True
+        )
         
-        # 1. Initialize LLM
-        self.llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name=GROQ_LLM_MODEL, temperature=0)
-        logging.info("  ✅ Groq LLM initialized.")
+        context = "\n\n".join(match['metadata']['text'] for match in query_result['matches'])
+        logging.info(f"[Request ID: {request_id}] Retrieved {len(query_result['matches'])} context snippets.")
         
-        # 2. Initialize embedding model
-        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL)
-        self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
-        logging.info(f"  ✅ Embedding model '{EMBEDDING_MODEL}' loaded (Dimension: {self.embedding_dim}).")
+        prompt = (
+            "You are a helpful assistant. Use the provided context to answer the question accurately. "
+            "If the answer is not available in the context, state that clearly.\n\n"
+            f"Context:\n{context}\n\n"
+            f"Question: {question}\n\n"
+            "Answer:"
+        )
         
-        # 3. Initialize Pinecone
-        self.pc = Pinecone(api_key=PINECONE_API_KEY)
-        self.index_name = PINECONE_INDEX_NAME
-        logging.info("  ✅ Pinecone connection successful.")
-        
-        # 4. Verify or create Pinecone index
-        if self.index_name not in self.pc.list_indexes().names():
-            logging.warning(f"Index '{self.index_name}' not found. Creating new index...")
-            self.pc.create_index(
-                name=self.index_name,
-                dimension=self.embedding_dim,
-                metric="cosine",
-                spec=ServerlessSpec(cloud='aws', region=PINECONE_ENVIRONMENT)
-            )
-            logging.info(f"  ✅ Index '{self.index_name}' created.")
-        else:
-            logging.info(f"  ✅ Index '{self.index_name}' already exists.")
-            
-        self.index = self.pc.Index(self.index_name)
-        logging.info("--- ✅ QASystem initialization complete ---")
+        logging.info(f"[Request ID: {request_id}] Sending prompt to Groq LLM.")
+        response = self.llm.invoke(prompt)
+        logging.info(f"[Request ID: {request_id}] Received response from LLM.")
+        return response.content.strip()
 
     def _chunk_text(self, text: str, request_id: str):
         """Splits a long text into smaller, manageable chunks."""
